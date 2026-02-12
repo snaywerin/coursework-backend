@@ -1,51 +1,53 @@
 const express = require('express');
 const cors = require('cors');
-require('dotenv').config();
-const { sequelize, testConnection } = require('./db');
-const { User } = require('./models');
-const { hashPassword, comparePassword, createToken, verifyToken } = require('./auth');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 
-// ========== РЕГИСТРАЦИЯ ==========
+const JWT_SECRET = 'simple-secret-key-2026';
+
+// ВРЕМЕННАЯ БАЗА ДАННЫХ В ПАМЯТИ
+const users = [];
+
+// РЕГИСТРАЦИЯ
 app.post('/api/auth/register', async (req, res) => {
     try {
         const { email, password, name } = req.body;
         
-        // Проверка на пустые поля
         if (!email || !password || !name) {
             return res.status(400).json({ error: 'Все поля обязательны' });
         }
-        
-        // Проверка, существует ли пользователь
-        const existingUser = await User.findOne({ where: { email } });
+
+        const existingUser = users.find(u => u.email === email);
         if (existingUser) {
             return res.status(400).json({ error: 'Пользователь уже существует' });
         }
-        
-        // Хешируем пароль и создаём пользователя
-        const hashedPassword = await hashPassword(password);
-        const user = await User.create({
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const newUser = {
+            id: users.length + 1,
             email,
-            password_hash: hashedPassword,
+            password: hashedPassword,
             name,
-            role: 'student'
-        });
+            role: 'student',
+            created_at: new Date().toISOString()
+        };
         
-        // Создаём токен
-        const token = createToken(user.id);
+        users.push(newUser);
+        
+        const token = jwt.sign({ id: newUser.id }, JWT_SECRET, { expiresIn: '7d' });
         
         res.status(201).json({
             message: 'Регистрация успешна',
             token,
             user: {
-                id: user.id,
-                email: user.email,
-                name: user.name,
-                role: user.role
+                id: newUser.id,
+                email: newUser.email,
+                name: newUser.name,
+                role: newUser.role
             }
         });
     } catch (error) {
@@ -53,30 +55,26 @@ app.post('/api/auth/register', async (req, res) => {
     }
 });
 
-// ========== ВХОД ==========
+// ВХОД
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
         
-        // Проверка на пустые поля
         if (!email || !password) {
             return res.status(400).json({ error: 'Email и пароль обязательны' });
         }
-        
-        // Ищем пользователя
-        const user = await User.findOne({ where: { email } });
+
+        const user = users.find(u => u.email === email);
         if (!user) {
             return res.status(401).json({ error: 'Неверный email или пароль' });
         }
-        
-        // Проверяем пароль
-        const isValid = await comparePassword(password, user.password_hash);
+
+        const isValid = await bcrypt.compare(password, user.password);
         if (!isValid) {
             return res.status(401).json({ error: 'Неверный email или пароль' });
         }
-        
-        // Создаём токен
-        const token = createToken(user.id);
+
+        const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '7d' });
         
         res.json({
             message: 'Вход выполнен успешно',
@@ -93,19 +91,29 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
-// ========== ПРИМЕР ЗАЩИЩЁННОГО РОУТА ==========
-app.get('/api/profile', verifyToken, async (req, res) => {
+// ПРОФИЛЬ
+app.get('/api/profile', (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) return res.status(401).json({ error: 'Нет токена' });
+    
     try {
-        const user = await User.findByPk(req.userId, {
-            attributes: ['id', 'email', 'name', 'role', 'avatar_url', 'created_at']
+        const decoded = jwt.verify(token, JWT_SECRET);
+        const user = users.find(u => u.id === decoded.id);
+        if (!user) return res.status(404).json({ error: 'Пользователь не найден' });
+        
+        res.json({
+            id: user.id,
+            email: user.email,
+            name: user.name,
+            role: user.role,
+            created_at: user.created_at
         });
-        res.json(user);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(401).json({ error: 'Неверный токен' });
     }
 });
 
-// ========== ПУБЛИЧНЫЕ РОУТЫ ==========
+// ГЛАВНАЯ
 app.get('/', (req, res) => {
     res.json({ 
         message: 'Добро пожаловать в API личного кабинета курсов!',
@@ -115,21 +123,9 @@ app.get('/', (req, res) => {
     });
 });
 
-app.get('/api/health', (req, res) => {
-    res.json({ 
-        status: 'OK',
-        timestamp: new Date().toISOString(),
-        service: 'personal-courses-api',
-        database: 'connected'
-    });
-});
-
-// ========== ЗАПУСК ==========
 const PORT = process.env.PORT || 5000;
-
 app.listen(PORT, () => {
     console.log(`✅ Сервер запущен на порту ${PORT}`);
-    console.log(`📡 Доступен по адресу: http://localhost:${PORT}`);
     console.log(`🔐 Регистрация: POST /api/auth/register`);
     console.log(`🔑 Вход: POST /api/auth/login`);
 });
